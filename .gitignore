@@ -1,0 +1,32 @@
+.venv/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Node (if present)
+node_modules/
+
+# Logs
+*.log
+
+# Media tools (large binaries)
+ffmpeg.exe
+ffplay.exe
+ffprobe.exe
+**/ffmpeg.exe
+**/ffplay.exe
+**/ffprobe.exe
+

@@ -1,0 +1,120 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: risk-postgres
+    environment:
+      POSTGRES_DB: risk_detection
+      POSTGRES_USER: riskuser
+      POSTGRES_PASSWORD: riskpass123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - risk-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U riskuser -d risk_detection"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: risk-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - risk-network
+    restart: unless-stopped
+
+  deepstream-analytics:
+    build:
+      context: ./deepstream-analytics
+      dockerfile: Dockerfile
+    container_name: risk-deepstream
+    environment:
+      - RISK_ENGINE_URL=http://risk-engine:8001
+      - CLIP_SERVICE_URL=http://clip-service:8002
+    volumes:
+      - ./deepstream-analytics/config:/app/config
+      - ./deepstream-analytics/models:/app/models
+      - deepstream_cache:/app/cache
+    networks:
+      - risk-network
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  risk-engine:
+    build:
+      context: ./risk-engine
+      dockerfile: Dockerfile
+    container_name: risk-engine
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://riskuser:riskpass123@postgres:5432/risk_detection
+      - CLIP_SERVICE_URL=http://clip-service:8002
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./risk-engine/config:/app/config
+      - event_clips:/app/clips
+    networks:
+      - risk-network
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  clip-service:
+    build:
+      context: ./clip-service
+      dockerfile: Dockerfile
+    container_name: clip-service
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://riskuser:riskpass123@postgres:5432/risk_detection
+      - STORAGE_PATH=/app/clips
+      - RING_BUFFER_SECONDS=60
+      - CLIP_PRE_SECONDS=10
+      - CLIP_POST_SECONDS=10
+    ports:
+      - "8002:8002"
+    volumes:
+      - event_clips:/app/clips
+      - clip_buffers:/app/buffers
+    networks:
+      - risk-network
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web-ui:
+    build:
+      context: ./web-ui
+      dockerfile: Dockerfile
+    container_name: risk-web-ui
+    environment:
+      - REACT_APP_API_URL=http://localhost:8001
+      - REACT_APP_CLIP_SERVICE_URL=http://localhost:8002
+    ports:
+      - "3000:80"
+    networks:
+      - risk-network
+    restart: unless-stopped
+    depends_on:
+      - risk-engine
+      - clip-service
+
+networks:
+  risk-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  deepstream_cache:
+  event_clips:
+  clip_buffers:

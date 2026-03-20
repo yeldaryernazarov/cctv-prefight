@@ -1,0 +1,96 @@
+# Конфигурация камер для тестирования
+# Скопируйте этот файл в cameras.yaml и настройте под ваши камеры
+
+# ===============================================
+# ТЕСТИРОВАНИЕ С КАМЕРОЙ ТЕЛЕФОНА
+# ===============================================
+# 
+# Чтобы использовать камеру телефона для тестирования:
+# 
+# 1. Установите приложение на телефон (одно из):
+#    - IP Webcam (Android): https://play.google.com/store/apps/details?id=com.pas.webcam
+#    - EpocCam (iOS/Android): https://www.kinoni.com/
+#    - DroidCam (Android/iOS): https://www.dev47apps.com/
+# 
+# 2. Подключите телефон к той же WiFi сети, что и компьютер
+# 
+# 3. Запустите приложение и найдите RTSP URL (обычно показан в приложении)
+#    Пример для IP Webcam: rtsp://192.168.1.150:8080/h264_ulaw.sdp
+# 
+# 4. Замените rtsp_url ниже на URL из приложения
+# 
+# 5. Сохраните этот файл как cameras.yaml
+# 
+# ===============================================
+
+cameras:
+  # Тестовая камера - замените URL на ваш RTSP URL из приложения телефона
+  - id: "camera-test-phone"
+    name: "Test Phone Camera"
+    # ЗАМЕНИТЕ ЭТОТ URL НА URL ИЗ ВАШЕГО ПРИЛОЖЕНИЯ!
+    # Примеры:
+    # IP Webcam: rtsp://192.168.1.150:8080/h264_ulaw.sdp
+    # DroidCam: rtsp://192.168.1.150:4747/video
+    rtsp_url: "rtsp://10.3.6.227:8080/h264_ulaw.sdp"
+    rtsp_substream_url: null  # Можно оставить пустым для тестирования
+    location: "Test Location"
+    fps: 15
+    zones:
+      - id: "zone-test-1"
+        name: "Test Zone"
+        # Зона покрывает весь кадр (обычно 640x480 или 1280x720)
+        polygon:
+          - {x: 50, y: 50}
+          - {x: 590, y: 50}
+          - {x: 590, y: 430}
+          - {x: 50, y: 430}
+        zone_type: "corridor"
+        schedule_profile: "default"
+
+  # Пример: реальная IP камера (если есть)
+  # - id: "camera-entrance-1"
+  #   name: "Main Entrance"
+  #   rtsp_url: "rtsp://admin:password@192.168.1.100:554/stream1"
+  #   rtsp_substream_url: "rtsp://admin:password@192.168.1.100:554/stream2"
+  #   location: "Main Entrance"
+  #   fps: 15
+  #   zones:
+  #     - id: "zone-entrance-1"
+  #       name: "Entrance Hallway"
+  #       polygon:
+  #         - {x: 100, y: 100}
+  #         - {x: 600, y: 100}
+  #         - {x: 600, y: 500}
+  #         - {x: 100, y: 500}
+  #       zone_type: "entrance"
+  #       schedule_profile: "default"
+
+# Настройки риск-событий
+risk_event_config:
+  PROXIMITY_RISK:
+    distance_threshold: 1.5  # Нормализованное расстояние
+    duration_min_sec: 2.0
+    rapid_approach_percent: 50
+  
+  CROWD_RISK:
+    min_count: 5
+    density_threshold: 0.3
+    area_threshold: 100
+  
+  KINETIC_RISK:
+    acceleration_threshold: 5.0
+    duration_min_sec: 1.5
+
+# Профили расписания
+schedule_profiles:
+  default:
+    # Стандартный мониторинг
+    weight_multiplier: 1.0
+  
+  quiet:
+    # Во время уроков - повышенная чувствительность
+    weight_multiplier: 1.5
+  
+  break:
+    # Во время перемен - пониженная чувствительность
+    weight_multiplier: 0.7

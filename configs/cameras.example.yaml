@@ -1,0 +1,84 @@
+# Example camera configuration file
+# Copy this file and edit with your camera details
+
+cameras:
+  - id: "camera-entrance-1"
+    name: "Main Entrance"
+    rtsp_url: "rtsp://admin:password@192.168.1.100:554/stream1"
+    rtsp_substream_url: "rtsp://admin:password@192.168.1.100:554/stream2"
+    location: "Main Entrance"
+    fps: 15
+    zones:
+      - id: "zone-entrance-1"
+        name: "Entrance Hallway"
+        polygon:
+          - {x: 100, y: 100}
+          - {x: 600, y: 100}
+          - {x: 600, y: 500}
+          - {x: 100, y: 500}
+        zone_type: "entrance"
+        schedule_profile: "default"
+
+  - id: "camera-corridor-1"
+    name: "Main Corridor"
+    rtsp_url: "rtsp://admin:password@192.168.1.101:554/stream1"
+    rtsp_substream_url: "rtsp://admin:password@192.168.1.101:554/stream2"
+    location: "First Floor Corridor"
+    fps: 15
+    zones:
+      - id: "zone-corridor-1"
+        name: "Corridor Area"
+        polygon:
+          - {x: 150, y: 150}
+          - {x: 650, y: 150}
+          - {x: 650, y: 450}
+          - {x: 150, y: 450}
+        zone_type: "corridor"
+        schedule_profile: "default"
+
+  - id: "camera-cafeteria-1"
+    name: "Cafeteria"
+    rtsp_url: "rtsp://admin:password@192.168.1.102:554/stream1"
+    rtsp_substream_url: "rtsp://admin:password@192.168.1.102:554/stream2"
+    location: "School Cafeteria"
+    fps: 15
+    zones:
+      - id: "zone-cafeteria-1"
+        name: "Main Dining Area"
+        polygon:
+          - {x: 200, y: 200}
+          - {x: 800, y: 200}
+          - {x: 800, y: 600}
+          - {x: 200, y: 600}
+        zone_type: "cafeteria"
+        schedule_profile: "break"  # Higher tolerance during breaks
+
+# Risk event configuration
+risk_event_config:
+  PROXIMITY_RISK:
+    distance_threshold: 1.5  # Normalized distance
+    duration_min_sec: 2.0
+    rapid_approach_percent: 50
+  
+  CROWD_RISK:
+    min_count: 5
+    density_threshold: 0.3
+    area_threshold: 100
+  
+  KINETIC_RISK:
+    acceleration_threshold: 5.0
+    duration_min_sec: 1.5
+
+# Schedule profiles (optional - can also be set in database)
+schedule_profiles:
+  default:
+    # Standard monitoring
+    weight_multiplier: 1.0
+  
+  quiet:
+    # During lessons - higher sensitivity
+    weight_multiplier: 1.5
+  
+  break:
+    # During breaks - lower sensitivity (more tolerance for crowds)
+    weight_multiplier: 0.7
