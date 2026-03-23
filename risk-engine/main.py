@@ -17,6 +17,8 @@ import logging
 import os
 import json
 import asyncio
+import shutil
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from models import *
@@ -58,6 +60,29 @@ def parse_timestamp_to_utc_naive(timestamp: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed
     return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _decision_to_label(decision: str) -> Optional[int]:
+    if decision == "false_positive":
+        return 0
+    if decision in {"confirmed", "escalated"}:
+        return 1
+    return None
+
+
+def _extract_event_confidence(alert: Alert, event_type: str) -> Optional[float]:
+    summary = alert.event_summary or []
+    values: List[float] = []
+    for item in summary:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != event_type:
+            continue
+        try:
+            values.append(float(item.get("confidence", 0.0)))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else None
 
 
 # Event aggregation state
@@ -617,6 +642,206 @@ async def create_alert_decision(
     await db.commit()
     
     return {"status": "ok", "decision_id": str(decision.id)}
+
+
+# ========== Retraining Endpoints ==========
+
+@app.post("/api/retraining/dataset/export")
+async def export_retraining_dataset(
+    export_request: RetrainingDatasetExportRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export labeled alerts into a local dataset directory."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    output_dir = Path(os.getenv("RETRAINING_DATASET_PATH", "./retraining-data")).resolve()
+    positive_dir = output_dir / "positive"
+    negative_dir = output_dir / "negative"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    positive_dir.mkdir(parents=True, exist_ok=True)
+    negative_dir.mkdir(parents=True, exist_ok=True)
+
+    result = await db.execute(
+        select(Alert).options(selectinload(Alert.decisions)).order_by(desc(Alert.timestamp))
+    )
+    alerts = result.scalars().all()
+
+    exported = 0
+    skipped = 0
+    manifest_path = output_dir / "manifest.jsonl"
+
+    with manifest_path.open("w", encoding="utf-8") as manifest:
+        for alert in alerts:
+            if not alert.decisions:
+                skipped += 1
+                continue
+
+            latest_decision = max(
+                alert.decisions,
+                key=lambda d: d.timestamp or datetime.min,
+            )
+            label = _decision_to_label(latest_decision.decision)
+            if label is None:
+                skipped += 1
+                continue
+
+            has_clip = bool(alert.clip_path and os.path.exists(alert.clip_path))
+            if not has_clip and not export_request.include_without_clip:
+                skipped += 1
+                continue
+
+            subset_dir = positive_dir if label == 1 else negative_dir
+            clip_target = None
+            if has_clip:
+                src = Path(alert.clip_path)
+                clip_target = subset_dir / f"{alert.id}{src.suffix.lower() or '.mp4'}"
+                if src.resolve() != clip_target.resolve():
+                    shutil.copy2(src, clip_target)
+
+            row = {
+                "alert_id": str(alert.id),
+                "camera_id": str(alert.camera_id),
+                "label": label,
+                "decision": latest_decision.decision,
+                "decision_comment": latest_decision.comment,
+                "alert_timestamp": alert.timestamp.isoformat() if alert.timestamp else None,
+                "risk_score": alert.risk_score,
+                "severity": alert.severity,
+                "clip_path": str(clip_target) if clip_target else None,
+                "event_summary": alert.event_summary or [],
+            }
+            manifest.write(json.dumps(row, ensure_ascii=False) + "\n")
+            exported += 1
+
+    return {
+        "status": "ok",
+        "output_dir": str(output_dir),
+        "manifest_path": str(manifest_path),
+        "exported": exported,
+        "skipped": skipped,
+    }
+
+
+@app.post("/api/retraining/thresholds/recompute", response_model=RetrainingThresholdResult)
+async def recompute_thresholds_from_feedback(
+    request: RetrainingThresholdRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Compute recommended threshold from operator decisions."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if request.min_samples < 4:
+        raise HTTPException(status_code=400, detail="min_samples must be >= 4")
+
+    result = await db.execute(
+        select(Alert).options(selectinload(Alert.decisions)).order_by(desc(Alert.timestamp))
+    )
+    alerts = result.scalars().all()
+
+    samples: List[dict] = []
+    for alert in alerts:
+        if not alert.decisions:
+            continue
+        latest_decision = max(alert.decisions, key=lambda d: d.timestamp or datetime.min)
+        label = _decision_to_label(latest_decision.decision)
+        if label is None:
+            continue
+        confidence = _extract_event_confidence(alert, request.event_type)
+        if confidence is None:
+            continue
+        samples.append({"y": label, "score": confidence})
+
+    total = len(samples)
+    positives = sum(1 for s in samples if s["y"] == 1)
+    negatives = total - positives
+    if total < request.min_samples or positives == 0 or negatives == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Not enough labeled samples for {request.event_type}. "
+                f"Need >= {request.min_samples} and both classes present."
+            ),
+        )
+
+    best = {"thr": 0.85, "f1": -1.0, "precision": 0.0, "recall": 0.0}
+    threshold = 0.0
+    while threshold <= 1.000001:
+        tp = fp = fn = 0
+        for sample in samples:
+            pred = 1 if sample["score"] >= threshold else 0
+            if pred == 1 and sample["y"] == 1:
+                tp += 1
+            elif pred == 1 and sample["y"] == 0:
+                fp += 1
+            elif pred == 0 and sample["y"] == 1:
+                fn += 1
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        if f1 > best["f1"] or (f1 == best["f1"] and threshold > best["thr"]):
+            best = {"thr": round(threshold, 4), "f1": f1, "precision": precision, "recall": recall}
+        threshold += request.step
+
+    output_path = Path(
+        os.getenv("RETRAINING_THRESHOLDS_PATH", "./retraining-data/threshold_overrides.json")
+    ).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = {}
+    if output_path.exists():
+        try:
+            existing = json.loads(output_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = {}
+
+    existing[request.event_type] = {
+        "threshold": best["thr"],
+        "f1": round(best["f1"], 4),
+        "precision": round(best["precision"], 4),
+        "recall": round(best["recall"], 4),
+        "samples_total": total,
+        "positives": positives,
+        "negatives": negatives,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    output_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return RetrainingThresholdResult(
+        event_type=request.event_type,
+        threshold=float(best["thr"]),
+        f1=float(round(best["f1"], 4)),
+        precision=float(round(best["precision"], 4)),
+        recall=float(round(best["recall"], 4)),
+        samples_total=total,
+        positives=positives,
+        negatives=negatives,
+        exported_at=utc_now_naive(),
+        output_path=str(output_path),
+    )
+
+
+@app.get("/api/retraining/thresholds")
+async def get_retraining_thresholds(
+    current_user: User = Depends(get_current_user),
+):
+    """Return current threshold overrides file content."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    output_path = Path(
+        os.getenv("RETRAINING_THRESHOLDS_PATH", "./retraining-data/threshold_overrides.json")
+    ).resolve()
+    if not output_path.exists():
+        return {"status": "missing", "path": str(output_path), "thresholds": {}}
+    try:
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="threshold overrides file is not valid JSON")
+    return {"status": "ok", "path": str(output_path), "thresholds": payload}
 
 
 # ========== Cameras Endpoints ==========
