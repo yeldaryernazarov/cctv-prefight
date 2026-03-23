@@ -108,6 +108,20 @@ npm start
 
 Open `http://localhost:3000` in your browser.
 
+### Docker one-command start (recommended)
+
+If you use Docker Desktop, start everything with one command from project root:
+
+```powershell
+.\start_windows_docker.ps1 -Build
+```
+
+For next runs without rebuild:
+
+```powershell
+.\start_windows_docker.ps1
+```
+
 Default credentials (once backend + DB are up and the admin auto-creation ran):
 
 - Username: `admin`

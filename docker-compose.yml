@@ -25,11 +25,12 @@ services:
       context: ./deepstream-analytics
       dockerfile: Dockerfile
     container_name: risk-deepstream
-    # runtime: nvidia  # Commented out for CPU version (development)
+    gpus: all
     environment:
       # - NVIDIA_VISIBLE_DEVICES=all  # Not needed for CPU version
       - RISK_ENGINE_URL=http://risk-engine:8001
       - CLIP_SERVICE_URL=http://clip-service:8002
+      - STREAM_SERVER_URL=http://stream-server:8003
     volumes:
       - ./deepstream-analytics/config:/app/config
       - ./deepstream-analytics/models:/app/models
@@ -40,6 +41,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      stream-server:
+        condition: service_started
 
   risk-engine:
     build:
@@ -143,6 +146,7 @@ services:
       - "8003:8003"
     environment:
       - RISK_ENGINE_URL=http://risk-engine:8001
+      - STREAM_SERVER_PORT=8003
     networks:
       - risk-network
     depends_on:

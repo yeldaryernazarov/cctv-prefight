@@ -121,11 +121,25 @@ person_detection:
   conf: 0.3
 
 violence_detection:
-  enabled: true
+  enabled: true      
   violence_threshold: 0.7
+  # Алерт в risk-engine отправляем только при вероятности >= 0.85
+  video_alert_threshold: 0.85
   inference_every_sec: 1.0
   event_cooldown_sec: 10.0
   pose_confidence_threshold: 0.3
+
+# 1-й этап: аудио из RTSP (как скользящее окно в a.py).
+# 2-й этап: видео-классификатор включается только если audio score >= pretrigger_threshold.
+audio_gate:
+  sample_rate: 16000
+  window_seconds: 5
+  overlap_seconds: 2
+  pretrigger_threshold: 0.50
+  # Как часто писать в логи текущий audio score и состояние gate
+  debug_log_every_sec: 5.0
+  # Как часто публиковать audio debug в stream-server (/debug/audio/{camera_id})
+  debug_publish_every_sec: 1.0
 
 profanity_detection:
   enabled: false
@@ -138,7 +152,7 @@ profanity_detection:
 # Публикация обработанных кадров (с AI-оверлеями) в stream-server для Web UI.
 stream_output:
   enabled: true
-  # Для docker-compose: http://stream-server:8003
-  server_url: "http://stream-server:8003"
+  # Локально на Windows обычно http://localhost:8003
+  server_url: "http://localhost:8003"
   every_n_frames: 2
   jpeg_quality: 80

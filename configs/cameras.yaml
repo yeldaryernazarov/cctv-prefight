@@ -31,7 +31,7 @@ cameras:
     # Примеры:
     # IP Webcam: rtsp://192.168.1.150:8080/h264_ulaw.sdp
     # DroidCam: rtsp://192.168.1.150:4747/video
-    rtsp_url: "rtsp://10.101.60.107:8080/h264_ulaw.sdp"
+    rtsp_url: "rtsp://192.168.1.168:8080/h264_ulaw.sdp"
     rtsp_substream_url: null  # Можно оставить пустым для тестирования
     location: "Test Location"
     fps: 15

@@ -167,14 +167,18 @@ class PoseViolenceDetector:
 
         return out
 
-    def update(self, frame: np.ndarray) -> Optional[Dict[str, Any]]:
+    def update(self, frame: np.ndarray, run_classifier: bool = True) -> Optional[Dict[str, Any]]:
         """
-        Push current frame keypoints into the window and run classification when ready.
-        Returns an event dict compatible with risk-engine / EventData.events.
+        Update pose window and optionally run classifier.
+        When run_classifier=False, keypoints/overlay are still updated.
         """
         pose_frame = self._extract_pose_frame(frame)
         self.last_pose_frame = pose_frame
         self.pose_window.append(pose_frame)
+
+        if not run_classifier:
+            self.last_violence_prob = 0.0
+            return None
 
         if len(self.pose_window) < self.sequence_length:
             return None

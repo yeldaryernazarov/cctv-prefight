@@ -30,3 +30,11 @@ ffprobe.exe
 **/ffplay.exe
 **/ffprobe.exe
 
+# ML model weights and checkpoints
+*.pt
+*.pth
+*.onnx
+*.engine
+models/
+**/models/
+

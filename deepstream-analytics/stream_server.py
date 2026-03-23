@@ -22,6 +22,7 @@ class StreamServer:
     def __init__(self):
         self.streams = {}  # camera_id -> frame buffer
         self.detections = defaultdict(list)  # camera_id -> list of detections
+        self.audio_debug = {}  # camera_id -> debug dict
         
     def update_frame(self, camera_id: str, frame: np.ndarray, detections: list):
         """Update frame with detections"""
@@ -66,6 +67,10 @@ class StreamServer:
     def update_jpeg_frame(self, camera_id: str, jpeg_bytes: bytes):
         """Update stream with pre-encoded JPEG bytes."""
         self.streams[camera_id] = jpeg_bytes
+
+    def update_audio_debug(self, camera_id: str, debug_payload: dict):
+        """Update audio debug payload for camera."""
+        self.audio_debug[camera_id] = debug_payload
     
     async def stream_handler(self, request):
         """Handle MJPEG stream requests"""
@@ -121,6 +126,27 @@ class StreamServer:
         self.update_jpeg_frame(camera_id, body)
         return web.json_response({'status': 'ok', 'camera_id': camera_id})
 
+    async def ingest_audio_debug(self, request):
+        """Ingest audio debug JSON payload for a camera."""
+        camera_id = request.match_info['camera_id']
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return web.json_response({'error': 'payload must be json object'}, status=400)
+        payload["updated_at"] = time.time()
+        self.update_audio_debug(camera_id, payload)
+        return web.json_response({'status': 'ok', 'camera_id': camera_id})
+
+    async def get_audio_debug(self, request):
+        """Get latest audio debug payload for a camera."""
+        camera_id = request.match_info['camera_id']
+        payload = self.audio_debug.get(camera_id)
+        if payload is None:
+            return web.json_response(
+                {'camera_id': camera_id, 'status': 'missing', 'message': 'no audio debug yet'},
+                status=404
+            )
+        return web.json_response(payload)
+
 
 async def create_app():
     """Create aiohttp application"""
@@ -133,6 +159,8 @@ async def create_app():
     app.router.add_get('/stream/{camera_id}', server.stream_handler)
     app.router.add_get('/api/cameras', server.list_cameras)
     app.router.add_post('/frame/{camera_id}', server.ingest_frame)
+    app.router.add_post('/audio_debug/{camera_id}', server.ingest_audio_debug)
+    app.router.add_get('/debug/audio/{camera_id}', server.get_audio_debug)
     
     # CORS
     from aiohttp_cors import setup as cors_setup, ResourceOptions

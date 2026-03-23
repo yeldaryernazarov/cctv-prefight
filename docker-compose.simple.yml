@@ -34,9 +34,11 @@ services:
       context: ./deepstream-analytics
       dockerfile: Dockerfile
     container_name: risk-deepstream
+    gpus: all
     environment:
       - RISK_ENGINE_URL=http://risk-engine:8001
       - CLIP_SERVICE_URL=http://clip-service:8002
+      - STREAM_SERVER_URL=http://stream-server:8003
     volumes:
       - ./deepstream-analytics/config:/app/config
       - ./deepstream-analytics/models:/app/models
@@ -47,6 +49,24 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      stream-server:
+        condition: service_started
+
+  stream-server:
+    build:
+      context: ./deepstream-analytics
+      dockerfile: Dockerfile
+    container_name: risk-stream-server
+    command: python stream_server.py
+    ports:
+      - "8003:8003"
+    environment:
+      - RISK_ENGINE_URL=http://risk-engine:8001
+    networks:
+      - risk-network
+    restart: unless-stopped
+    depends_on:
+      - risk-engine
 
   risk-engine:
     build:

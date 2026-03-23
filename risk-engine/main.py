@@ -10,7 +10,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy import select, and_, func, desc
 from sqlalchemy.orm import selectinload
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from collections import defaultdict
 import logging
@@ -44,6 +44,22 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 redis_client = None
 
 
+def utc_now_naive() -> datetime:
+    """UTC now as naive datetime for DB columns without timezone."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def parse_timestamp_to_utc_naive(timestamp: str) -> datetime:
+    """Parse ISO timestamp and normalize to UTC naive."""
+    normalized = timestamp.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 # Event aggregation state
 class RiskAggregator:
     """Aggregates risk events and generates alerts"""
@@ -69,7 +85,13 @@ class RiskAggregator:
         
         logger.info(f"Loaded config: {self.config}")
     
-    async def process_events(self, camera_id: str, events: List[dict], db: AsyncSession):
+    async def process_events(
+        self,
+        camera_id: str,
+        events: List[dict],
+        db: AsyncSession,
+        event_timestamp: Optional[datetime] = None,
+    ):
         """Process incoming events and generate alerts if needed"""
         
         # Load configuration if not loaded
@@ -82,7 +104,7 @@ class RiskAggregator:
         cooldown_seconds = self.config.get('cooldown_seconds', 180)
         
         # Add events to buffer
-        current_time = datetime.now()
+        current_time = event_timestamp or utc_now_naive()
         for event in events:
             self.event_buffer[camera_id].append({
                 'event': event,
@@ -112,7 +134,7 @@ class RiskAggregator:
             
             severity = 'critical' if risk_score >= critical_threshold else 'high' if risk_score >= alert_threshold * 1.3 else 'medium'
             
-            await self._create_alert(camera_id, risk_score, severity, db)
+            await self._create_alert(camera_id, risk_score, severity, db, current_time)
             
             # Set cooldown
             self.cooldowns[cooldown_key] = current_time
@@ -148,7 +170,14 @@ class RiskAggregator:
         
         return score
     
-    async def _create_alert(self, camera_id: str, risk_score: float, severity: str, db: AsyncSession):
+    async def _create_alert(
+        self,
+        camera_id: str,
+        risk_score: float,
+        severity: str,
+        db: AsyncSession,
+        alert_timestamp: datetime,
+    ):
         """Create alert in database and trigger clip saving"""
         
         # Get camera
@@ -177,7 +206,7 @@ class RiskAggregator:
         # Create alert
         alert = Alert(
             camera_id=camera_id,
-            timestamp=datetime.now(),
+            timestamp=alert_timestamp,
             risk_score=risk_score,
             severity=severity,
             status='new',
@@ -208,7 +237,7 @@ class RiskAggregator:
                     json={
                         'alert_id': str(alert_id),
                         'camera_id': str(camera_id),
-                        'timestamp': datetime.now().isoformat()
+                        'timestamp': datetime.now(timezone.utc).isoformat()
                     },
                     timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
@@ -461,11 +490,16 @@ async def receive_events(
     logger.info(f"Received {len(events)} events from camera {camera_id}")
     
     # Store raw events in database
+    try:
+        event_timestamp = parse_timestamp_to_utc_naive(event_data.timestamp)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid timestamp format")
+
     for event in events:
         risk_event = RiskEvent(
             camera_id=camera_id,
             event_type=event['type'],
-            timestamp=datetime.fromisoformat(event_data.timestamp),
+            timestamp=event_timestamp,
             confidence=event.get('confidence', 0.0),
             involved_track_ids=event.get('track_ids', []),
             meta_data=event.get('meta_data', {})
@@ -476,7 +510,7 @@ async def receive_events(
     
     # Process for aggregation and alerting
     if events:
-        await aggregator.process_events(camera_id, events, db)
+        await aggregator.process_events(camera_id, events, db, event_timestamp)
     
     return {"status": "ok", "events_processed": len(events)}
 

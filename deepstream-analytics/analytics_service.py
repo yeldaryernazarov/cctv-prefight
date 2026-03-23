@@ -11,7 +11,9 @@ import time
 import json
 import asyncio
 import aiohttp
-from datetime import datetime
+import subprocess
+import threading
+from datetime import datetime, timezone
 from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Tuple, Optional
@@ -33,6 +35,151 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def utc_now_iso() -> str:
+    """Return RFC3339 timestamp in UTC with explicit timezone."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+class RTSPAudioGate:
+    """Lightweight RTSP audio analyzer (a.py-like sliding windows)."""
+
+    def __init__(
+        self,
+        rtsp_url: str,
+        *,
+        sample_rate: int = 16000,
+        window_seconds: int = 5,
+        overlap_seconds: int = 2,
+        pretrigger_threshold: float = 0.60,
+    ):
+        self.rtsp_url = rtsp_url
+        self.sample_rate = int(sample_rate)
+        self.window_seconds = int(window_seconds)
+        self.overlap_seconds = int(overlap_seconds)
+        self.pretrigger_threshold = float(pretrigger_threshold)
+        self.buffer = deque(
+            maxlen=self.sample_rate * (self.window_seconds + self.overlap_seconds)
+        )
+        self.proc = None
+        self.running = False
+        self.thread = None
+        self.last_score = 0.0
+        self.last_level = "normal"
+        self.last_analyze_ts = 0.0
+        self.total_samples = 0
+        self.last_chunk_ts = 0.0
+        self.last_error = None
+        self.last_exit_code = None
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self.last_error = None
+        self.last_exit_code = None
+        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+        self.proc = None
+
+    def _capture_loop(self):
+        cmd = [
+            "ffmpeg",
+            "-rtsp_transport",
+            "tcp",
+            "-i",
+            self.rtsp_url,
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(self.sample_rate),
+            "-ac",
+            "1",
+            "-f",
+            "s16le",
+            "pipe:1",
+        ]
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=self.sample_rate * 2,
+            )
+            chunk_size = self.sample_rate // 10  # 100 ms
+            while self.running and self.proc and self.proc.stdout:
+                raw = self.proc.stdout.read(chunk_size * 2)
+                if not raw:
+                    self.last_error = "ffmpeg returned empty audio chunk (stream may have no audio track)"
+                    break
+                samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                self.buffer.extend(samples.tolist())
+                self.total_samples += int(samples.size)
+                self.last_chunk_ts = time.time()
+        except Exception as e:
+            self.last_error = str(e)
+            logger.warning(f"Audio RTSP capture failed: {e}")
+        finally:
+            if self.proc is not None:
+                self.last_exit_code = self.proc.poll()
+            if self.proc and self.proc.poll() is None:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+
+    def _heuristic_score(self, audio: np.ndarray) -> float:
+        if audio.size < self.sample_rate:
+            return 0.0
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        zcr = float(np.mean(np.abs(np.diff(np.sign(audio))) > 0))
+        # Simple high-frequency proxy: average |delta|
+        hf = float(np.mean(np.abs(np.diff(audio))))
+
+        rms_norm = min(1.0, rms / 0.15)
+        zcr_norm = min(1.0, zcr / 0.20)
+        hf_norm = min(1.0, hf / 0.08)
+        return float(np.clip(0.45 * rms_norm + 0.30 * zcr_norm + 0.25 * hf_norm, 0.0, 1.0))
+
+    def should_enable_video(self) -> bool:
+        now = time.time()
+        step_seconds = max(1, self.window_seconds - self.overlap_seconds)
+        if (now - self.last_analyze_ts) >= step_seconds:
+            need = self.sample_rate * self.window_seconds
+            data = list(self.buffer)
+            if len(data) < need:
+                data = [0.0] * (need - len(data)) + data
+            audio = np.array(data[-need:], dtype=np.float32)
+            self.last_score = self._heuristic_score(audio)
+            self.last_level = "pre_fight" if self.last_score >= self.pretrigger_threshold else "normal"
+            self.last_analyze_ts = now
+        return self.last_score >= self.pretrigger_threshold
+
+    def debug_state(self) -> dict:
+        return {
+            "running": bool(self.running),
+            "last_score": float(self.last_score),
+            "last_level": self.last_level,
+            "pretrigger_threshold": float(self.pretrigger_threshold),
+            "buffer_samples": len(self.buffer),
+            "total_samples": int(self.total_samples),
+            "last_chunk_age_sec": (
+                float(time.time() - self.last_chunk_ts) if self.last_chunk_ts > 0 else None
+            ),
+            "last_error": self.last_error,
+            "last_exit_code": self.last_exit_code,
+        }
 
 
 @dataclass
@@ -395,6 +542,7 @@ class CameraProcessor:
         models_cfg = self.system_config.get("models", {}) or {}
         person_cfg = self.system_config.get("person_detection", {}) or {}
         violence_cfg = self.system_config.get("violence_detection", {}) or {}
+        audio_cfg = self.system_config.get("audio_gate", {}) or {}
         profanity_cfg = self.system_config.get("profanity_detection", {}) or {}
         stream_cfg = self.system_config.get("stream_output", {}) or {}
 
@@ -405,8 +553,20 @@ class CameraProcessor:
         self.stream_jpeg_quality = int(stream_cfg.get("jpeg_quality", 80))
         self.stream_server_url = os.getenv(
             "STREAM_SERVER_URL",
-            stream_cfg.get("server_url", "http://stream-server:8003"),
+            stream_cfg.get("server_url", "http://localhost:8003"),
         ).rstrip("/")
+        self.video_alert_threshold = float(violence_cfg.get("video_alert_threshold", 0.85))
+        self.audio_debug_log_every_sec = float(audio_cfg.get("debug_log_every_sec", 5.0))
+        self._last_audio_debug_log_ts = 0.0
+        self.audio_debug_publish_every_sec = float(audio_cfg.get("debug_publish_every_sec", 1.0))
+        self._last_audio_debug_publish_ts = 0.0
+        self.audio_gate = RTSPAudioGate(
+            self.rtsp_url,
+            sample_rate=int(audio_cfg.get("sample_rate", 16000)),
+            window_seconds=int(audio_cfg.get("window_seconds", 5)),
+            overlap_seconds=int(audio_cfg.get("overlap_seconds", 2)),
+            pretrigger_threshold=float(audio_cfg.get("pretrigger_threshold", 0.60)),
+        )
 
         # YOLO model for person detection (GPU-accelerated when available)
         try:
@@ -426,6 +586,10 @@ class CameraProcessor:
 
             # Allow users to "just drop" models into deepstream-analytics/models/.
             person_model_path = models_cfg.get("person_yolo_path")
+            if person_model_path and not os.path.isabs(person_model_path):
+                candidate = os.path.join(models_dir, person_model_path)
+                if os.path.exists(candidate):
+                    person_model_path = candidate
             if not person_model_path:
                 for cand in ["person_yolo.pt", "person_yolo_yolov8n.pt", "yolov8n.pt"]:
                     p = os.path.join(models_dir, cand)
@@ -462,8 +626,13 @@ class CameraProcessor:
             violence_enabled = bool(violence_cfg.get("enabled", False))
 
             violence_torchscript_path = models_cfg.get("violence_torchscript_path")
+            if violence_torchscript_path and not os.path.isabs(violence_torchscript_path):
+                candidate = os.path.join(models_dir, violence_torchscript_path)
+                if os.path.exists(candidate):
+                    violence_torchscript_path = candidate
             if not violence_torchscript_path:
                 for cand in [
+                    "fight_detector.pt",
                     "pose_model_torchscript.pt",
                     "violence_pose_torchscript.pt",
                     "violence_model_torchscript.pt",
@@ -476,8 +645,12 @@ class CameraProcessor:
             pose_config_path = models_cfg.get("pose_config_path") or os.path.join(models_dir, "pose_config.json")
 
             pose_yolo_path = models_cfg.get("pose_yolo_path")
+            if pose_yolo_path and not os.path.isabs(pose_yolo_path):
+                candidate = os.path.join(models_dir, pose_yolo_path)
+                if os.path.exists(candidate):
+                    pose_yolo_path = candidate
             if not pose_yolo_path:
-                for cand in ["pose_yolo.pt", "yolov8n-pose.pt", "yolov8n-pose.onnx"]:
+                for cand in ["pose_yolo.pt", "yolov8m-pose.pt", "yolov8n-pose.pt", "yolov8n-pose.onnx"]:
                     p = os.path.join(models_dir, cand)
                     if os.path.exists(p):
                         pose_yolo_path = p
@@ -559,10 +732,12 @@ class CameraProcessor:
             return False
         
         logger.info(f"Connected to camera {self.camera_name}")
+        self.audio_gate.start()
         return True
     
     def disconnect(self):
         """Disconnect from stream"""
+        self.audio_gate.stop()
         if self.cap:
             self.cap.release()
             self.cap = None
@@ -631,10 +806,27 @@ class CameraProcessor:
         events.extend(self.risk_detector.detect_kinetic_risk(tracks))
 
         # Optional: violence + profanity triggers
+        audio_allows_video = self.audio_gate.should_enable_video()
+        now = time.time()
+        if (now - self._last_audio_debug_log_ts) >= self.audio_debug_log_every_sec:
+            dbg = self.audio_gate.debug_state()
+            logger.info(
+                f"[AudioGate] {self.camera_name}: score={self.audio_gate.last_score:.3f} "
+                f"threshold={self.audio_gate.pretrigger_threshold:.2f} "
+                f"video_gate={'ON' if audio_allows_video else 'OFF'} "
+                f"buffer={dbg['buffer_samples']} last_error={dbg['last_error']}"
+            )
+            self._last_audio_debug_log_ts = now
+
         if self.violence_detector:
-            violence_event = self.violence_detector.update(frame)
+            violence_event = self.violence_detector.update(frame, run_classifier=audio_allows_video)
             if violence_event:
-                events.append(violence_event)
+                video_prob = float(violence_event.get("confidence", 0.0))
+                if video_prob >= self.video_alert_threshold:
+                    violence_event.setdefault("meta_data", {})
+                    violence_event["meta_data"]["audio_pretrigger_score"] = self.audio_gate.last_score
+                    violence_event["meta_data"]["audio_pretrigger_level"] = self.audio_gate.last_level
+                    events.append(violence_event)
 
         if self.profanity_detector:
             profanity_event = self.profanity_detector.update(frame)
@@ -643,10 +835,11 @@ class CameraProcessor:
 
         # Publish processed frame for Web UI live preview.
         await self.publish_live_stream_frame(frame)
+        await self.publish_audio_debug(audio_allows_video)
         
         return {
             'camera_id': self.camera_id,
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': utc_now_iso(),
             'frame_id': self.frame_count,
             'fps': self.fps,
             'people_count': len(tracks),
@@ -678,6 +871,20 @@ class CameraProcessor:
             except Exception as e:
                 logger.debug(f"Failed to draw violence overlay for {self.camera_name}: {e}")
 
+        # Debug overlay for validating RTSP audio pipeline in live stream.
+        audio_score = float(self.audio_gate.last_score)
+        audio_gate_text = "ON" if audio_score >= self.audio_gate.pretrigger_threshold else "OFF"
+        audio_color = (0, 200, 0) if audio_gate_text == "ON" else (0, 180, 255)
+        cv2.putText(
+            stream_frame,
+            f"AUDIO {audio_score:.2f}  GATE {audio_gate_text}",
+            (16, 92),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            audio_color,
+            2,
+        )
+
         encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.stream_jpeg_quality]
         ok, jpeg = cv2.imencode(".jpg", stream_frame, encode_params)
         if not ok:
@@ -700,6 +907,33 @@ class CameraProcessor:
                     )
         except Exception as e:
             logger.debug(f"Stream push error for {self.camera_name}: {e}")
+
+    async def publish_audio_debug(self, audio_allows_video: bool):
+        """Publish audio debug payload to stream-server."""
+        now = time.time()
+        if (now - self._last_audio_debug_publish_ts) < self.audio_debug_publish_every_sec:
+            return
+        self._last_audio_debug_publish_ts = now
+
+        payload = {
+            "camera_id": self.camera_id,
+            "camera_name": self.camera_name,
+            "video_gate": bool(audio_allows_video),
+            "timestamp": utc_now_iso(),
+            **self.audio_gate.debug_state(),
+        }
+        try:
+            if self.stream_session is None or self.stream_session.closed:
+                self.stream_session = aiohttp.ClientSession()
+            async with self.stream_session.post(
+                f"{self.stream_server_url}/audio_debug/{self.camera_id}",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=1.0),
+            ) as response:
+                if response.status >= 400:
+                    logger.debug(f"Audio debug push failed for {self.camera_name}: {response.status}")
+        except Exception as e:
+            logger.debug(f"Audio debug push error for {self.camera_name}: {e}")
     
     async def run(self, event_queue: asyncio.Queue):
         """Main processing loop"""
