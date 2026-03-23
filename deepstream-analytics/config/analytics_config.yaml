@@ -31,7 +31,7 @@ cameras:
     # Примеры:
     # IP Webcam: rtsp://192.168.1.150:8080/h264_ulaw.sdp
     # DroidCam: rtsp://192.168.1.150:4747/video
-    rtsp_url: "rtsp://10.3.6.227:8080/h264_ulaw.sdp"
+    rtsp_url: "rtsp://192.168.1.168:8080/h264_ulaw.sdp"
     rtsp_substream_url: null  # Можно оставить пустым для тестирования
     location: "Test Location"
     fps: 15
@@ -108,10 +108,10 @@ models:
   person_yolo_path: null
 
   # Pose YOLO (YOLO pose для извлечения keypoints под violence model)
-  pose_yolo_path: null
+  pose_yolo_path: yolov8m-pose.pt
 
   # TorchScript модели из ноутбука (PoseViolenceDetector)
-  violence_torchscript_path: null
+  violence_torchscript_path: fight_detector.pt
 
   # Файл из ноутбука `pose_config.json` (опционально, для чтения SEQUENCE_LENGTH/MAX_PERSONS/NUM_KEYPOINTS)
   pose_config_path: null
@@ -121,7 +121,7 @@ person_detection:
   conf: 0.3
 
 violence_detection:
-  enabled: false
+  enabled: true
   violence_threshold: 0.7
   inference_every_sec: 1.0
   event_cooldown_sec: 10.0
@@ -134,3 +134,11 @@ profanity_detection:
   event_cooldown_sec: 30.0
   easyocr_languages: ["ru", "en"]
   min_keywords_found: 1
+
+# Публикация обработанных кадров (с AI-оверлеями) в stream-server для Web UI.
+stream_output:
+  enabled: true
+  # Для docker-compose: http://stream-server:8003
+  server_url: "http://stream-server:8003"
+  every_n_frames: 2
+  jpeg_quality: 80

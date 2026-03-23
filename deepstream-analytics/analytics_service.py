@@ -385,6 +385,7 @@ class CameraProcessor:
         self.frame_count = 0
         self.fps = 0
         self.last_fps_update = time.time()
+        self.stream_session = None
         
         # --- Models: person detection + optional violence/profanity detectors ---
         models_dir = os.getenv(
@@ -395,9 +396,17 @@ class CameraProcessor:
         person_cfg = self.system_config.get("person_detection", {}) or {}
         violence_cfg = self.system_config.get("violence_detection", {}) or {}
         profanity_cfg = self.system_config.get("profanity_detection", {}) or {}
+        stream_cfg = self.system_config.get("stream_output", {}) or {}
 
         self.person_class_ids = person_cfg.get("class_ids", [0])
         self.person_conf = float(person_cfg.get("conf", 0.3))
+        self.stream_output_enabled = bool(stream_cfg.get("enabled", True))
+        self.stream_output_every_n_frames = max(1, int(stream_cfg.get("every_n_frames", 2)))
+        self.stream_jpeg_quality = int(stream_cfg.get("jpeg_quality", 80))
+        self.stream_server_url = os.getenv(
+            "STREAM_SERVER_URL",
+            stream_cfg.get("server_url", "http://stream-server:8003"),
+        ).rstrip("/")
 
         # YOLO model for person detection (GPU-accelerated when available)
         try:
@@ -631,6 +640,9 @@ class CameraProcessor:
             profanity_event = self.profanity_detector.update(frame)
             if profanity_event:
                 events.append(profanity_event)
+
+        # Publish processed frame for Web UI live preview.
+        await self.publish_live_stream_frame(frame)
         
         return {
             'camera_id': self.camera_id,
@@ -650,6 +662,44 @@ class CameraProcessor:
             ],
             'events': events
         }
+
+    async def publish_live_stream_frame(self, frame):
+        """Send processed JPEG frame to stream-server."""
+        if not self.stream_output_enabled:
+            return
+
+        if self.frame_count % self.stream_output_every_n_frames != 0:
+            return
+
+        stream_frame = frame
+        if self.violence_detector:
+            try:
+                stream_frame = self.violence_detector.draw_overlay(frame)
+            except Exception as e:
+                logger.debug(f"Failed to draw violence overlay for {self.camera_name}: {e}")
+
+        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.stream_jpeg_quality]
+        ok, jpeg = cv2.imencode(".jpg", stream_frame, encode_params)
+        if not ok:
+            return
+
+        try:
+            if self.stream_session is None or self.stream_session.closed:
+                self.stream_session = aiohttp.ClientSession()
+
+            async with self.stream_session.post(
+                f"{self.stream_server_url}/frame/{self.camera_id}",
+                data=jpeg.tobytes(),
+                headers={"Content-Type": "image/jpeg"},
+                timeout=aiohttp.ClientTimeout(total=1.0),
+            ) as response:
+                if response.status >= 400:
+                    logger.debug(
+                        f"Stream push failed for {self.camera_name}: "
+                        f"{response.status}"
+                    )
+        except Exception as e:
+            logger.debug(f"Stream push error for {self.camera_name}: {e}")
     
     async def run(self, event_queue: asyncio.Queue):
         """Main processing loop"""
@@ -677,6 +727,8 @@ class CameraProcessor:
         """Stop processing"""
         self.running = False
         self.disconnect()
+        if self.stream_session and not self.stream_session.closed:
+            asyncio.create_task(self.stream_session.close())
 
 
 async def send_events_to_risk_engine(event_queue: asyncio.Queue, risk_engine_url: str):

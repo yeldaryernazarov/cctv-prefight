@@ -62,6 +62,10 @@ class StreamServer:
         ret, jpeg = cv2.imencode('.jpg', annotated_frame)
         if ret:
             self.streams[camera_id] = jpeg.tobytes()
+
+    def update_jpeg_frame(self, camera_id: str, jpeg_bytes: bytes):
+        """Update stream with pre-encoded JPEG bytes."""
+        self.streams[camera_id] = jpeg_bytes
     
     async def stream_handler(self, request):
         """Handle MJPEG stream requests"""
@@ -103,6 +107,20 @@ class StreamServer:
             'cameras': list(self.streams.keys())
         })
 
+    async def ingest_frame(self, request):
+        """Ingest pre-encoded JPEG frame for a camera."""
+        camera_id = request.match_info['camera_id']
+        body = await request.read()
+        if not body:
+            return web.json_response({'error': 'empty frame body'}, status=400)
+
+        # Minimal validation for JPEG SOI marker.
+        if not body.startswith(b'\xff\xd8'):
+            return web.json_response({'error': 'body is not jpeg'}, status=400)
+
+        self.update_jpeg_frame(camera_id, body)
+        return web.json_response({'status': 'ok', 'camera_id': camera_id})
+
 
 async def create_app():
     """Create aiohttp application"""
@@ -114,6 +132,7 @@ async def create_app():
     # Routes
     app.router.add_get('/stream/{camera_id}', server.stream_handler)
     app.router.add_get('/api/cameras', server.list_cameras)
+    app.router.add_post('/frame/{camera_id}', server.ingest_frame)
     
     # CORS
     from aiohttp_cors import setup as cors_setup, ResourceOptions

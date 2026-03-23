@@ -5,8 +5,15 @@ from collections import deque
 from typing import Any, Deque, Dict, Optional
 
 import numpy as np
+import cv2
 
 logger = logging.getLogger(__name__)
+
+COCO_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4), (0, 5), (0, 6), (5, 6),
+    (5, 7), (7, 9), (6, 8), (8, 10), (5, 11), (6, 12),
+    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
+]
 
 
 class PoseViolenceDetector:
@@ -59,6 +66,8 @@ class PoseViolenceDetector:
         self.pose_window: Deque[np.ndarray] = deque(maxlen=self.sequence_length)
         self.last_infer_ts = 0.0
         self.last_event_ts = 0.0
+        self.last_pose_frame: Optional[np.ndarray] = None
+        self.last_violence_prob: float = 0.0
 
     @classmethod
     def from_config_files(
@@ -164,6 +173,7 @@ class PoseViolenceDetector:
         Returns an event dict compatible with risk-engine / EventData.events.
         """
         pose_frame = self._extract_pose_frame(frame)
+        self.last_pose_frame = pose_frame
         self.pose_window.append(pose_frame)
 
         if len(self.pose_window) < self.sequence_length:
@@ -189,6 +199,7 @@ class PoseViolenceDetector:
             violence_prob = float(probs[-1]) if len(probs) else 0.0
         else:
             violence_prob = float(probs[self.violence_class_index])
+        self.last_violence_prob = violence_prob
 
         self.last_infer_ts = now
 
@@ -208,4 +219,48 @@ class PoseViolenceDetector:
                 "sequence_length": self.sequence_length,
             },
         }
+
+    def draw_overlay(self, frame: np.ndarray) -> np.ndarray:
+        """Draw pose keypoints/skeleton and violence probability HUD on frame."""
+        annotated = frame.copy()
+        h, w = annotated.shape[:2]
+
+        pose = self.last_pose_frame
+        if pose is not None:
+            colors = [(0, 220, 0), (0, 200, 220), (255, 180, 0), (220, 0, 220)]
+            for person_idx in range(min(pose.shape[0], len(colors))):
+                kpts = pose[person_idx]
+                color = colors[person_idx]
+
+                points = []
+                for j in range(min(kpts.shape[0], self.num_keypoints)):
+                    x = int(float(kpts[j, 0]) * w)
+                    y = int(float(kpts[j, 1]) * h)
+                    c = float(kpts[j, 2])
+                    points.append((x, y, c))
+                    if c > 0.2:
+                        cv2.circle(annotated, (x, y), 3, color, -1)
+
+                for a, b in COCO_SKELETON:
+                    if a < len(points) and b < len(points):
+                        if points[a][2] > 0.2 and points[b][2] > 0.2:
+                            cv2.line(annotated, (points[a][0], points[a][1]), (points[b][0], points[b][1]), color, 2)
+
+        prob = float(self.last_violence_prob)
+        label = "FIGHT" if prob >= self.violence_threshold else "Normal"
+        label_color = (0, 0, 230) if label == "FIGHT" else (0, 220, 0)
+
+        overlay = annotated.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 64), (30, 30, 30), -1)
+        cv2.addWeighted(overlay, 0.55, annotated, 0.45, 0, annotated)
+        cv2.putText(
+            annotated,
+            f"{label}  {prob:.0%}",
+            (16, 38),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            label_color,
+            2,
+        )
+        return annotated
 
