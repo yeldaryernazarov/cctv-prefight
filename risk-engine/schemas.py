@@ -166,6 +166,31 @@ class AlertDecisionResponse(BaseModel):
         from_attributes = True
 
 
+# ========== Retraining Schemas ==========
+
+class RetrainingDatasetExportRequest(BaseModel):
+    include_without_clip: bool = False
+
+
+class RetrainingThresholdRequest(BaseModel):
+    event_type: str = "VIOLENCE_POSE_RISK"
+    min_samples: int = 20
+    step: float = Field(default=0.01, gt=0, le=0.5)
+
+
+class RetrainingThresholdResult(BaseModel):
+    event_type: str
+    threshold: float
+    f1: float
+    precision: float
+    recall: float
+    samples_total: int
+    positives: int
+    negatives: int
+    exported_at: datetime
+    output_path: str
+
+
 # ========== Configuration Schemas ==========
 
 class ConfigUpdate(BaseModel):

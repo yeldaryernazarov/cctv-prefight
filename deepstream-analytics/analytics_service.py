@@ -556,6 +556,26 @@ class CameraProcessor:
             stream_cfg.get("server_url", "http://localhost:8003"),
         ).rstrip("/")
         self.video_alert_threshold = float(violence_cfg.get("video_alert_threshold", 0.85))
+        self.event_threshold_overrides = {}
+        thresholds_path = os.getenv(
+            "THRESHOLD_OVERRIDES_PATH",
+            os.path.join(os.path.dirname(__file__), "config", "threshold_overrides.json"),
+        )
+        if os.path.exists(thresholds_path):
+            try:
+                with open(thresholds_path, "r", encoding="utf-8") as thresholds_file:
+                    self.event_threshold_overrides = json.load(thresholds_file) or {}
+                override = (
+                    self.event_threshold_overrides.get("VIOLENCE_POSE_RISK", {}) or {}
+                ).get("threshold")
+                if override is not None:
+                    self.video_alert_threshold = float(override)
+                    logger.info(
+                        f"Applied retraining threshold for VIOLENCE_POSE_RISK: "
+                        f"{self.video_alert_threshold:.3f}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to load threshold overrides file '{thresholds_path}': {e}")
         self.audio_debug_log_every_sec = float(audio_cfg.get("debug_log_every_sec", 5.0))
         self._last_audio_debug_log_ts = 0.0
         self.audio_debug_publish_every_sec = float(audio_cfg.get("debug_publish_every_sec", 1.0))
